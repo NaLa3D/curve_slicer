@@ -53,10 +53,13 @@
 
 ## 📥 インストール方法
 
-1. GitHub の「Code」>「Download ZIP」からダウンロードするか、`curve_slicer.py` を直接保存します。
-2. Blender を起動し、**編集 > プリファレンス > アドオン** を開きます。
-3. 右上の **「インストール... (Install...)」** からダウンロードしたファイルを選択します。
-4. 一覧に表示された **「Curve View Trimmer」** にチェックを入れて有効化します。
+1. 本ページの緑色のボタン **「Code」 > 「Download ZIP」** をクリックしてダウンロードします。
+2. ダウンロードした ZIP ファイルを **右クリックして「すべて展開（解凍）」** します。
+3. Blender を起動し、**編集 > プリファレンス > アドオン** を開きます。
+4. 右上の **「インストール... (Install...)」** をクリックします。
+5. 解凍したフォルダ内にある **`curve_slicer.py`**（Pythonファイル）を選択してインストールします。
+   - ※ ZIPファイルのままだと正常に認識されない場合があるため、必ず解凍して `.py` ファイルを選択してください。
+6. 一覧に表示された **「Curve View Trimmer」** にチェックを入れて有効化します。
 
 ---
 
@@ -69,6 +72,11 @@
 ## 🌐 English Summary
 
 **Curve View Trimmer** is a Blender add-on that allows you to intuitively trim/carve 3D meshes along your 3D viewport's view direction using freehand annotation strokes.
+
+### Installation
+1. Click **Code > Download ZIP** and **unzip** the downloaded archive.
+2. In Blender, go to **Edit > Preferences > Add-ons > Install...**
+3. Select the unzipped **`curve_slicer.py`** file and enable it.
 
 ### Quick Workflow
 1. Select your target mesh using the eyedropper picker.
