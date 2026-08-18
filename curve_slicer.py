@@ -2,7 +2,7 @@ bl_info = {
     "name": "Curve View Trimmer",
     "author": "NaLa",
     "version": (2, 3, 0),
-    "blender": (3, 0, 0),
+    "blender": (4, 5, 0),
     "location": "View3D > Sidebar > Curve Slicer",
     "description": "Trim 3D objects along the view direction using annotation strokes.",
     "category": "Mesh",
