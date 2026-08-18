@@ -1,16 +1,26 @@
 bl_info = {
-    "name": "Curve View Trimmer (ビュー投影トリマー)",
-    "author": "Antigravity Pair",
-    "version": (2, 2, 0),
+    "name": "Curve View Trimmer",
+    "author": "NaLa",
+    "version": (2, 3, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Curve Slicer",
-    "description": "アノテーション（手描き線）からビュー方向に沿って立体をトリム（削り落とし）するツール",
+    "description": "Trim 3D objects along the view direction using annotation strokes.",
     "category": "Mesh",
 }
 
 import bpy
 import bmesh
 from mathutils import Vector, Quaternion
+
+
+def poll_mesh_object(self, obj):
+    """対象オブジェクト選択ピッカー用のフィルター（メッシュかつカッター以外、かつ削除されていない有効なオブジェクト）"""
+    return (
+        obj.type == 'MESH'
+        and obj.users > 0
+        and not obj.name.startswith("Slicer_Cutter")
+        and not obj.name.startswith("Temp_Trim")
+    )
 
 
 def get_3d_view_rotation(context):
@@ -53,16 +63,45 @@ def get_active_annotation_strokes(context):
     return strokes
 
 
+def validate_target_object(scene):
+    """登録されている対象オブジェクトがシーン内に存在するか検証し、削除されていれば自動クリア"""
+    try:
+        target = scene.slicer_target_object
+        if target:
+            if target.name not in scene.objects:
+                scene.slicer_target_object = None
+                return None
+            return target
+    except (ReferenceError, KeyError, AttributeError):
+        try:
+            scene.slicer_target_object = None
+        except Exception:
+            pass
+        return None
+    return None
+
+
 def get_target_mesh(context):
-    """シーン内の対象メッシュを取得"""
+    """シーン内の対象メッシュを取得（指定されたオブジェクトを最優先）"""
+    # 1. パネルで明示的に指定された対象オブジェクト（存在確認付き）
+    target = validate_target_object(context.scene)
+    if target and target.type == 'MESH' and not target.name.startswith("Slicer_Cutter"):
+        return target
+
+    # 2. 現在のアクティブオブジェクト
     if context.active_object and context.active_object.type == 'MESH' and not context.active_object.name.startswith("Slicer_Cutter"):
         return context.active_object
+
+    # 3. 選択中のオブジェクト
     for obj in context.selected_objects:
         if obj.type == 'MESH' and not obj.name.startswith("Slicer_Cutter"):
             return obj
+
+    # 4. シーン内の最初のメッシュ（フォールバック）
     for obj in context.scene.objects:
         if obj.type == 'MESH' and not obj.name.startswith("Slicer_Cutter"):
             return obj
+
     return None
 
 
@@ -163,19 +202,8 @@ class CURVESLICER_OT_convert_annotation(bpy.types.Operator):
         target_count = 20
         step = max(1, len(raw_points) // target_count)
         sampled_points = raw_points[::step]
-        if raw_points[-1] not in sampled_points:
+        if sampled_points[-1] != raw_points[-1]:
             sampled_points.append(raw_points[-1])
-
-        # 両端の自動延長
-        p_start = sampled_points[0]
-        p_next = sampled_points[1]
-        dir_start = (p_start - p_next).normalized()
-        sampled_points[0] = p_start + dir_start * 1.0
-
-        p_end = sampled_points[-1]
-        p_prev = sampled_points[-2]
-        dir_end = (p_end - p_prev).normalized()
-        sampled_points[-1] = p_end + dir_end * 1.0
 
         view_rot = get_3d_view_rotation(context)
         view_fwd = (view_rot @ Vector((0, 0, -1))).normalized()
@@ -298,19 +326,20 @@ class CURVESLICER_OT_trim(bpy.types.Operator):
         cutter_obj = get_cutter_object(context)
 
         if not target_obj:
-            self.report({'WARNING'}, "切断対象の立体（メッシュ）がありません。")
+            self.report({'WARNING'}, "切断対象の立体（メッシュ）が指定されていないか、見つかりません。")
             return {'CANCELLED'}
 
         if not cutter_obj or "base_points" not in cutter_obj:
             self.report({'WARNING'}, "切断用のリボンカッターがありません。")
             return {'CANCELLED'}
 
+        # カッターの深さ（ビュー前後方向の厚み）
         bbox_corners = [target_obj.matrix_world @ Vector(corner) for corner in target_obj.bound_box]
         size_x = max(c.x for c in bbox_corners) - min(c.x for c in bbox_corners)
         size_y = max(c.y for c in bbox_corners) - min(c.y for c in bbox_corners)
         size_z = max(c.z for c in bbox_corners) - min(c.z for c in bbox_corners)
         max_dim = max(size_x, size_y, size_z, 1.0)
-        depth = max_dim * 4.0
+        depth = max_dim * 5.0
 
         base_points = [Vector(p) for p in cutter_obj["base_points"]]
         normals = [Vector(n) for n in cutter_obj["normals"]]
@@ -322,6 +351,7 @@ class CURVESLICER_OT_trim(bpy.types.Operator):
 
         bm = bmesh.new()
 
+        # 手前側(-view_fwd) と 奥側(+view_fwd) の頂点
         v_kf = [bm.verts.new(base_points[i] - view_fwd * depth) for i in range(len(base_points))]
         v_kb = [bm.verts.new(base_points[i] + view_fwd * depth) for i in range(len(base_points))]
         v_qf = [bm.verts.new(q_pts[i] - view_fwd * depth) for i in range(len(base_points))]
@@ -331,17 +361,18 @@ class CURVESLICER_OT_trim(bpy.types.Operator):
 
         n_seg = len(base_points) - 1
 
+        # 側面の面張り（外向き法線になるよう頂点順序を調整）
         for i in range(n_seg):
-            bm.faces.new([v_kf[i], v_kf[i+1], v_kb[i+1], v_kb[i]])
-        for i in range(n_seg):
-            bm.faces.new([v_qf[i], v_qb[i], v_qb[i+1], v_qf[i+1]])
-        for i in range(n_seg):
-            bm.faces.new([v_kf[i], v_qf[i], v_qf[i+1], v_kf[i+1]])
-        for i in range(n_seg):
-            bm.faces.new([v_kb[i], v_kb[i+1], v_qb[i+1], v_qb[i]])
-        bm.faces.new([v_kf[0], v_kb[0], v_qb[0], v_qf[0]])
-        bm.faces.new([v_kf[-1], v_qf[-1], v_qb[-1], v_kb[-1]])
+            bm.faces.new([v_kf[i], v_kb[i], v_kb[i+1], v_kf[i+1]])
+            bm.faces.new([v_qf[i], v_qf[i+1], v_qb[i+1], v_qb[i]])
+            bm.faces.new([v_kf[i], v_kf[i+1], v_qf[i+1], v_qf[i]])
+            bm.faces.new([v_kb[i], v_qb[i], v_qb[i+1], v_kb[i+1]])
 
+        # 始端と終端のキャップ面
+        bm.faces.new([v_kf[0], v_qf[0], v_qb[0], v_kb[0]])
+        bm.faces.new([v_kf[-1], v_kb[-1], v_qb[-1], v_qf[-1]])
+
+        # 法線を確実に外向きに統一
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
 
         temp_mesh = bpy.data.meshes.new("Temp_Trim_Mesh")
@@ -354,6 +385,9 @@ class CURVESLICER_OT_trim(bpy.types.Operator):
         context.view_layer.objects.active = target_obj
         target_obj.select_set(True)
 
+        orig_poly_count = len(target_obj.data.polygons)
+
+        # 1. まず EXACT ソルバー（高精度）で試行
         bool_mod = target_obj.modifiers.new(name="View_Trim", type='BOOLEAN')
         bool_mod.object = trim_cutter_obj
         bool_mod.operation = 'DIFFERENCE'
@@ -361,12 +395,20 @@ class CURVESLICER_OT_trim(bpy.types.Operator):
 
         bpy.ops.object.modifier_apply(modifier=bool_mod.name)
 
+        # 2. もし EXACT で形状が変わらなかった（不発だった）場合、FAST ソルバーで自動再試行
+        if len(target_obj.data.polygons) == orig_poly_count:
+            bool_mod_fast = target_obj.modifiers.new(name="View_Trim_Fast", type='BOOLEAN')
+            bool_mod_fast.object = trim_cutter_obj
+            bool_mod_fast.operation = 'DIFFERENCE'
+            bool_mod_fast.solver = 'FAST'
+            bpy.ops.object.modifier_apply(modifier=bool_mod_fast.name)
+
         bpy.data.objects.remove(trim_cutter_obj, do_unlink=True)
 
         if not self.keep_cutter and cutter_obj.name.startswith("Slicer_Cutter"):
             bpy.data.objects.remove(cutter_obj, do_unlink=True)
 
-        self.report({'INFO'}, "★ビュー方向へのトリムが完了しました！")
+        self.report({'INFO'}, f"★『{target_obj.name}』のビュー方向トリムが完了しました！")
         return {'FINISHED'}
 
 
@@ -381,10 +423,21 @@ class CURVESLICER_PT_main_panel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
 
+        # 削除されたオブジェクトの自動クリア
+        validate_target_object(context.scene)
+
+        # トリム対象オブジェクトの選択
+        box_target = layout.box()
+        box_target.label(text="トリム対象オブジェクト", icon='OBJECT_DATA')
+        box_target.prop(context.scene, "slicer_target_object", text="")
+
+        layout.separator()
+
         # 手順1
         box1 = layout.box()
         box1.label(text="【手順1】ビュー視点で描く", icon='GREASEPENCIL')
-        box1.label(text="※ Dキー+ドラッグで線を描く", icon='INFO')
+        box1.label(text="・D + 左ドラッグ : 線を描く", icon='LINE_DATA')
+        box1.label(text="・D + 右ドラッグ : 線を消す（消しゴム）", icon='INFO')
         
         col1 = box1.column(align=True)
         col1.scale_y = 1.2
@@ -405,7 +458,7 @@ class CURVESLICER_PT_main_panel(bpy.types.Panel):
 
         layout.separator()
 
-        # ★一番下に配置したリセットボタン
+        # リセットボタン
         layout.operator("curve_slicer.clear_annotation", text="🗑️ ペン線を消す / リセット", icon='TRASH')
 
 
@@ -418,6 +471,12 @@ classes = (
 )
 
 def register():
+    bpy.types.Scene.slicer_target_object = bpy.props.PointerProperty(
+        name="対象オブジェクト",
+        description="トリム（切断）の対象とするメッシュオブジェクト",
+        type=bpy.types.Object,
+        poll=poll_mesh_object
+    )
     bpy.types.Scene.ribbon_height = bpy.props.FloatProperty(
         name="リボンの幅",
         description="リボンの幅（太さ）",
@@ -434,6 +493,8 @@ def register():
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    if hasattr(bpy.types.Scene, "slicer_target_object"):
+        del bpy.types.Scene.slicer_target_object
     if hasattr(bpy.types.Scene, "ribbon_height"):
         del bpy.types.Scene.ribbon_height
 
